@@ -1,0 +1,8 @@
+# MiniShell script-file demo.
+# Run from the project root with: ./minishell tests/scripts/demo.msh
+pwd
+NAME=MiniShell
+echo "Hello from $NAME"
+echo "alpha beta gamma" | grep beta
+false || echo "recovered from a failed command"
+true && echo "conditional execution works"

@@ -1,0 +1,9 @@
+# Edge case: one process that already holds all it needs.
+processes 1
+resources 1
+allocation
+1
+max
+1
+available
+0

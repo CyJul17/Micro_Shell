@@ -1,90 +1,70 @@
-
 #include "main.h"
 #include "shell_getline.h"
 
-t_builtin g_builtin[] = {
-    {.builtin_name = "echo", .foo = shell_echo};
-    {.builtin_name = "env", .foo = shell_env};
-    {.builtin_name = "exit", .foo = shell_exit},
-    {.buildin_name = NULL};
-    
-};
+int g_last_status = 0;
+volatile sig_atomic_t g_should_exit = 0;
 
-int status = 0;
-
-void shell_launch(char **args) {
-
-    if (Fork() == SHELL_CHILD) {
-        Execvp(args[0], args);
-    } else {
-        Wait(&status);
-    }
+static void print_banner(void) {
+    printf("==============================================\n");
+    printf(" MiniShell - CmpSc 123 Final Project\n");
+    printf(" Shell + CPU Scheduling + Deadlock Simulator\n");
+    printf(" Type 'help' for commands, 'exit' to quit.\n");
+    printf("==============================================\n");
 }
 
-void shell_exec(char **args) {
-    int i;
-    const char *curr;
-     while ((curr = g_builtin[i].builtin_name)) {
-        if (!strcmp(curr,args[0])) {
-             status = g_builtin[i].foo(args);
-             return;
-        } ++i;
-     }
-     shell_launch(args);
-}
+static int run_stream(FILE *fp, int interactive) {
+    char *line = NULL;
+    size_t cap = 0;
+    int status = g_last_status;
 
-char **shell_split_line(char *line) {
-    char **tokens;
-    unsigned int position;
-    size_t bufsize = BUFSIZ;
-
-    tokens = Malloc(bufsize * sizeof  *tokens); 
-    position = 0;
-
-    for (char *token = strtok(line, DEL); token; token = strtok(NULL, DEL)) {
-        tokens[position++] = token; 
-        if (position >= bufsize) {
-            bufsize *= 2;
-            tokens = Realloc(tokens, bufsize * sizeof(*tokens));
+    for (;;) {
+        if (interactive) {
+            fputs(MINISHELL_PROMPT, stdout);
+            fflush(stdout);
         }
-    }
-    tokens[position] = NULL;
-    return tokens;
-}
 
-char *shell_read_line(void) {
-    char *buffer = NULL;
-    size_t bufferSize = 0;
-    char cwd[BUFSIZ];
-
-    GetCwd(cwd, sizeof(cwd));
-
-    printf(C"%s" RESET "Talaba $> ", cwd);
-
-    if (shell_getline(&buffer, &bufferSize, stdin) == -1) {
-        free(buffer);
-        buffer = NULL;
-
-        if (feof(stdin)) {
-            printf(RED "[End of File]" RESET "\n");
-        } else {
-            printf(RED "Getline failed" RESET  "\n");
+        ssize_t n = shell_getline(&line, &cap, fp);
+        if (n < 0) {
+            if (interactive) putchar('\n');
+            break;
         }
+
+        status = shell_execute_line(line);
+        g_last_status = status;
+        if (g_should_exit) break;
     }
-    return buffer;
+
+    free(line);
+    return status;
 }
 
-int main() {
-    char *line;
-    char **args;
-    printBanner();
+int main(int argc, char **argv) {
+    /* The shell survives Ctrl+C; foreground children reset these handlers. */
+    signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
 
-    //REPL -> Read Evaluate Print -> Loop
-    while((line = shell_read_line())) {
-       args = shell_split_line(line); 
-       cell_exec(args); 
-       free(args);
-       free(line);
+    if (argc == 3 && !strcmp(argv[1], "-c")) {
+        int status = shell_execute_line(argv[2]);
+        g_last_status = status;
+        return status & 0xff;
     }
-    return EXIT_SUCCESS; 
+
+    if (argc == 2 && argv[1][0] != '-') {
+        FILE *fp = fopen(argv[1], "r");
+        if (!fp) {
+            print_error("%s: %s", argv[1], strerror(errno));
+            return 1;
+        }
+        int status = run_stream(fp, 0);
+        fclose(fp);
+        return status & 0xff;
+    }
+
+    if (argc != 1) {
+        fprintf(stderr, "usage: %s [-c command] [script]\n", MINISHELL_NAME);
+        return EXIT_USAGE;
+    }
+
+    print_banner();
+    return run_stream(stdin, 1) & 0xff;
 }

@@ -1,0 +1,11 @@
+# Two processes in a deadlock cycle.
+processes 2
+resources 2
+allocation
+1 0
+0 1
+max
+2 0
+0 2
+available
+0 0

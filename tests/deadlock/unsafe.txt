@@ -1,0 +1,13 @@
+# Unsafe state: every process still needs resources and none are available.
+processes 3
+resources 2
+allocation
+1 0
+0 1
+1 1
+max
+2 1
+1 2
+2 2
+available
+0 0

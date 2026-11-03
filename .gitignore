@@ -1,0 +1,17 @@
+# Build output
+build/
+minishell
+minishell.exe
+token_demo
+token_demo.exe
+*.o
+*.obj
+
+# Old standalone binaries
+talaba.exe
+tokens_test.exe
+
+# Editor / OS noise
+.vscode/*.log
+*.tmp
+errors.txt

@@ -1,19 +1,25 @@
 #include "shell_getline.h"
+
+#include <stdint.h>
 #include <stdlib.h>
 
 ssize_t shell_getline(char **lineptr, size_t *n, FILE *stream) {
     if (!lineptr || !n || !stream) return -1;
 
     if (*lineptr == NULL || *n == 0) {
+        free(*lineptr);
+        *lineptr = NULL;
         *n = 128;
         *lineptr = malloc(*n);
-        if (!*lineptr) return -1; 
+        if (!*lineptr) return -1;
     }
 
     size_t len = 0;
-    int c;
+    int c = EOF;
+
     while ((c = fgetc(stream)) != EOF) {
         if (len + 2 > *n) {
+            if (*n > SIZE_MAX / 2) return -1;
             size_t newsize = *n * 2;
             char *tmp = realloc(*lineptr, newsize);
             if (!tmp) return -1;

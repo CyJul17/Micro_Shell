@@ -1,0 +1,3 @@
+# Edge case: the CPU is idle before the first arrival.
+1 10 3 1
+2 12 2 2
