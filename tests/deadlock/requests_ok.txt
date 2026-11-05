@@ -1,0 +1,25 @@
+# Detection with a Request matrix: no deadlock (textbook example).
+# Available is 0 0 0, but P0 and P2 request nothing, so they finish and
+# release enough for the rest.
+processes 5
+resources 3
+allocation
+0 1 0
+2 0 0
+3 0 3
+2 1 1
+0 0 2
+max
+0 1 0
+4 0 2
+3 0 3
+3 1 1
+0 0 4
+available
+0 0 0
+requests
+0 0 0
+2 0 2
+0 0 0
+1 0 0
+0 0 2

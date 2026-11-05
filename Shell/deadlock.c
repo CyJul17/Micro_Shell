@@ -11,6 +11,8 @@ typedef struct {
     int **max;
     int **need;
     int *avail;
+    int **req;          /* optional "requests" matrix: outstanding requests */
+    int has_req_matrix;
     int has_request;
     int req_pid;
     int *request;
@@ -20,7 +22,8 @@ typedef enum {
     SEC_NONE,
     SEC_ALLOC,
     SEC_MAX,
-    SEC_AVAIL
+    SEC_AVAIL,
+    SEC_REQ
 } Section;
 
 static void dl_free(DLSystem *sys) {
@@ -36,6 +39,10 @@ static void dl_free(DLSystem *sys) {
     if (sys->need) {
         for (int i = 0; i < sys->p; i++) free(sys->need[i]);
         free(sys->need);
+    }
+    if (sys->req) {
+        for (int i = 0; i < sys->p; i++) free(sys->req[i]);
+        free(sys->req);
     }
     free(sys->avail);
     free(sys->request);
@@ -133,6 +140,7 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
     int alloc_rows = 0;
     int max_rows = 0;
     int avail_count = 0;
+    int req_rows = 0;
     Section section = SEC_NONE;
     int values[512];
 
@@ -158,7 +166,15 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
         char *text = trim(line);
         if (!*text) continue;
 
+        /*
+         * The matrices are sized from the first counts seen, so a second
+         * count would make later rows overflow them. Reject redefinitions.
+         */
         if (starts_word(text, "processes")) {
+            if (p >= 0) {
+                *err = xstrfmt("line %d: process count already declared", line_no);
+                goto fail;
+            }
             if (!parse_after_word(text, "processes", &p) || p < 0) {
                 *err = xstrfmt("line %d: invalid process count", line_no);
                 goto fail;
@@ -168,6 +184,10 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
             continue;
         }
         if (starts_word(text, "resources")) {
+            if (r >= 0) {
+                *err = xstrfmt("line %d: resource count already declared", line_no);
+                goto fail;
+            }
             if (!parse_after_word(text, "resources", &r) || r < 1) {
                 *err = xstrfmt("line %d: invalid resource count", line_no);
                 goto fail;
@@ -186,6 +206,21 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
         }
         if (starts_word(text, "available")) {
             section = SEC_AVAIL;
+            continue;
+        }
+        if (starts_word(text, "requests")) {
+            if (p < 0 || r < 1) {
+                *err = xstrfmt("line %d: processes and resources must be declared "
+                               "before requests", line_no);
+                goto fail;
+            }
+            if (sys->has_req_matrix) {
+                *err = xstrfmt("line %d: requests section already given", line_no);
+                goto fail;
+            }
+            sys->req = matrix_alloc(p, r);
+            sys->has_req_matrix = 1;
+            section = SEC_REQ;
             continue;
         }
         if (starts_word(text, "request")) {
@@ -301,6 +336,20 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
             }
             avail_count = r;
             section = SEC_NONE;
+        } else if (section == SEC_REQ) {
+            if (req_rows >= p || count != r) {
+                *err = xstrfmt("line %d: requests row needs %d values", line_no, r);
+                goto fail;
+            }
+            for (int j = 0; j < r; j++) {
+                if (values[j] < 0) {
+                    *err = xstrfmt("line %d: negative request", line_no);
+                    goto fail;
+                }
+                sys->req[req_rows][j] = values[j];
+            }
+            req_rows++;
+            if (req_rows == p) section = SEC_NONE;
         }
     }
 
@@ -318,6 +367,10 @@ static int load_system(const char *path, DLSystem *sys, char **err) {
     }
     if (avail_count != r) {
         *err = xstrfmt("expected %d available values, found %d", r, avail_count);
+        goto fail;
+    }
+    if (sys->has_req_matrix && req_rows != p) {
+        *err = xstrfmt("expected %d requests rows, found %d", p, req_rows);
         goto fail;
     }
 
@@ -370,6 +423,7 @@ static void print_system(const DLSystem *sys) {
     print_matrix("Allocation", sys->alloc, sys->p, sys->r);
     print_matrix("Max", sys->max, sys->p, sys->r);
     print_matrix("Need", sys->need, sys->p, sys->r);
+    if (sys->has_req_matrix) print_matrix("Request", sys->req, sys->p, sys->r);
 }
 
 static void print_sequence(const int *seq, int len) {
@@ -388,8 +442,22 @@ static void print_sequence(const int *seq, int len) {
  * Safety / detection
  * ==================================================================== */
 
-static int safety_check(DLSystem *sys, int *seq, int *seq_len,
-                        unsigned char *finish) {
+static int row_is_zero(const int *row, int n) {
+    for (int j = 0; j < n; j++) {
+        if (row[j] != 0) return 0;
+    }
+    return 1;
+}
+
+/*
+ * Work/Finish reduction shared by both algorithms. `demand` is what each
+ * process still has to obtain before it can finish:
+ *   - Banker's safety check: Need = Max - Allocation;
+ *   - deadlock detection:    the current Request matrix.
+ * In detection mode a process holding nothing cannot be part of a deadlock.
+ */
+static int reduce_system(DLSystem *sys, int **demand, int detection,
+                         int *seq, int *seq_len, unsigned char *finish) {
     int *work = xmalloc((size_t)sys->r * sizeof(*work));
     for (int j = 0; j < sys->r; j++) work[j] = sys->avail[j];
     for (int i = 0; i < sys->p; i++) finish[i] = 0;
@@ -399,9 +467,13 @@ static int safety_check(DLSystem *sys, int *seq, int *seq_len,
         int found = -1;
         for (int i = 0; i < sys->p; i++) {
             if (finish[i]) continue;
+            if (detection && row_is_zero(sys->alloc[i], sys->r)) {
+                found = i;
+                break;
+            }
             int can_finish = 1;
             for (int j = 0; j < sys->r; j++) {
-                if (sys->need[i][j] > work[j]) {
+                if (demand[i][j] > work[j]) {
                     can_finish = 0;
                     break;
                 }
@@ -422,13 +494,31 @@ static int safety_check(DLSystem *sys, int *seq, int *seq_len,
     return *seq_len == sys->p;
 }
 
+static int safety_check(DLSystem *sys, int *seq, int *seq_len,
+                        unsigned char *finish) {
+    return reduce_system(sys, sys->need, 0, seq, seq_len, finish);
+}
+
 static void run_detection(DLSystem *sys) {
     int *seq = xmalloc((size_t)(sys->p > 0 ? sys->p : 1) * sizeof(*seq));
     unsigned char *finish = xmalloc((size_t)(sys->p > 0 ? sys->p : 1));
     int seq_len = 0;
-    int safe = safety_check(sys, seq, &seq_len, finish);
+    int safe;
 
     printf("\nDeadlock detection:\n");
+    if (sys->has_req_matrix) {
+        safe = reduce_system(sys, sys->req, 1, seq, &seq_len, finish);
+    } else {
+        /*
+         * Without a Request matrix the current requests are unknown. Assume
+         * the worst case, that every process is waiting for its whole
+         * remaining Need; this is the same test as Banker's safety check.
+         */
+        printf("Note: no 'requests' section; assuming each process is "
+               "requesting its full Need (Max - Allocation).\n");
+        safe = reduce_system(sys, sys->need, 0, seq, &seq_len, finish);
+    }
+
     if (safe) {
         printf("No deadlock detected. All processes can finish.\n");
         printf("Possible completion order: ");
@@ -579,6 +669,9 @@ static void deadlock_usage(void) {
     printf("  ...\n");
     printf("  available\n");
     printf("  3 3 2\n");
+    printf("  requests          (optional, for detect: one row per process\n");
+    printf("  0 0 0              with its current outstanding request)\n");
+    printf("  ...\n");
     printf("  request 1 1 0 2   (optional, for banker)\n");
 }
 

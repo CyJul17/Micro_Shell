@@ -131,6 +131,112 @@ static void gantt_print(const Gantt *g) {
     putchar('\n');
 }
 
+/* ======================================================================
+ * Process state transitions
+ *
+ * Replays the finished schedule (arrivals + Gantt chart) and prints every
+ * PCB state change: New -> Ready on arrival, Ready -> Running when a process
+ * gets the CPU, Running -> Ready when it is preempted (quantum expired or a
+ * queue switch), and Running -> Terminated when its burst completes.
+ * ==================================================================== */
+
+typedef enum {
+    ST_NEW,
+    ST_READY,
+    ST_RUNNING,
+    ST_TERMINATED
+} ProcState;
+
+static const char *state_name(ProcState s) {
+    switch (s) {
+        case ST_NEW: return "New";
+        case ST_READY: return "Ready";
+        case ST_RUNNING: return "Running";
+        case ST_TERMINATED: return "Terminated";
+    }
+    return "?";
+}
+
+static int cmp_ints(const void *a, const void *b) {
+    int x = *(const int *)a;
+    int y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+static int find_proc(const ProcList *pl, int pid) {
+    for (size_t i = 0; i < pl->len; i++) {
+        if (pl->items[i].pid == pid) return (int)i;
+    }
+    return -1;
+}
+
+static void log_transition(int time, int pid, ProcState *state, ProcState to,
+                           const char *why) {
+    printf("  t=%-5d P%-4d %-8s -> %-10s %s\n", time, pid,
+           state_name(*state), state_name(to), why);
+    *state = to;
+}
+
+static void print_state_log(const ProcList *pl, const Gantt *g) {
+    size_t n = pl->len;
+    size_t ntimes = 0;
+    int *times = xmalloc((n + 2 * g->len + 1) * sizeof(*times));
+    ProcState *state = xmalloc((n ? n : 1) * sizeof(*state));
+
+    for (size_t i = 0; i < n; i++) {
+        state[i] = ST_NEW;
+        times[ntimes++] = pl->items[i].arrival;
+    }
+    for (size_t s = 0; s < g->len; s++) {
+        times[ntimes++] = g->items[s].start;
+        times[ntimes++] = g->items[s].end;
+    }
+    qsort(times, ntimes, sizeof(*times), cmp_ints);
+
+    printf("\nProcess state transitions:\n");
+    for (size_t k = 0; k < ntimes; k++) {
+        int t = times[k];
+        if (k > 0 && times[k - 1] == t) continue; /* each time once */
+
+        /* 1. The process whose CPU slice ends now leaves Running. */
+        for (size_t s = 0; s < g->len; s++) {
+            const GanttSeg *seg = &g->items[s];
+            if (seg->pid < 0 || seg->end != t) continue;
+            int i = find_proc(pl, seg->pid);
+            if (i < 0 || state[i] != ST_RUNNING) continue;
+            if (pl->items[i].completion == t) {
+                log_transition(t, seg->pid, &state[i], ST_TERMINATED,
+                               "(burst complete)");
+            } else {
+                log_transition(t, seg->pid, &state[i], ST_READY,
+                               "(preempted)");
+            }
+        }
+
+        /* 2. Processes arriving now are admitted to the ready queue. */
+        for (size_t i = 0; i < n; i++) {
+            if (state[i] == ST_NEW && pl->items[i].arrival == t) {
+                log_transition(t, pl->items[i].pid, &state[i], ST_READY,
+                               "(arrived)");
+            }
+        }
+
+        /* 3. The process whose CPU slice starts now is dispatched. */
+        for (size_t s = 0; s < g->len; s++) {
+            const GanttSeg *seg = &g->items[s];
+            if (seg->pid < 0 || seg->start != t) continue;
+            int i = find_proc(pl, seg->pid);
+            if (i < 0 || state[i] != ST_READY) continue;
+            log_transition(t, seg->pid, &state[i], ST_RUNNING, "(dispatched)");
+        }
+    }
+    printf("  (No process enters Waiting: the simulator has no I/O events, so a\n"
+           "   process that is not running waits in the Ready queue.)\n");
+
+    free(times);
+    free(state);
+}
+
 static void gantt_free(Gantt *g) {
     free(g->items);
     g->items = NULL;
@@ -337,7 +443,7 @@ static void print_pcb(const ProcList *pl, int initial, int queue_mode) {
         if (initial && queue_mode == 1) q = mlq_level(p);
         if (initial && queue_mode == 2) q = 0;
         printf("%-6d %-8d %-6d %-9d %-12s", p->pid, p->arrival, p->burst,
-               p->priority, initial ? "Ready" : "Terminated");
+               p->priority, initial ? "New" : "Terminated");
         if (queue_mode) printf(" %-6s", queue_name(q));
         putchar('\n');
     }
@@ -731,9 +837,11 @@ int sched_main(int argc, char **argv) {
     const char *algo_name = NULL;
     const char *file = NULL;
     int quantum = 4;
+    int quantum_given = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--quantum")) {
+            quantum_given = 1;
             if (i + 1 >= argc || !parse_int(argv[++i], &quantum)) {
                 print_error("sched: --quantum requires a positive integer");
                 return 2;
@@ -790,6 +898,11 @@ int sched_main(int argc, char **argv) {
         sched_usage();
         return 2;
     }
+    if (quantum_given && alg != ALG_RR) {
+        /* MLQ/MLFQ use fixed per-queue quanta; the others are not time-sliced. */
+        print_error("sched: --quantum only applies to rr");
+        return 2;
+    }
 
     ProcList pl;
     char *err = NULL;
@@ -823,6 +936,7 @@ int sched_main(int argc, char **argv) {
     }
 
     gantt_print(&g);
+    print_state_log(&pl, &g);
     print_pcb(&pl, 0, queue_mode);
     print_results(&pl);
 
