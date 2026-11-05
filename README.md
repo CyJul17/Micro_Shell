@@ -20,7 +20,7 @@ The written comparison report is in [`docs/REPORT.md`](docs/REPORT.md).
 | Shell | Built-ins, external programs, quoting, variables, redirection, pipes, conditionals |
 | CPU scheduling | FCFS, SJN, Priority, Round-Robin, Multilevel Queue, Multilevel Feedback Queue |
 | Deadlock | Detection, Banker's safety algorithm, safe sequence, resource requests, recovery suggestion |
-| Tests | 99 regression checks and edge-case input files |
+| Tests | 127 regression checks and edge-case input files |
 | Report | Algorithm comparison with measured waiting/turnaround averages |
 
 ## Build
@@ -128,6 +128,9 @@ portable part of the mode string on Windows and the exact mode on POSIX.
 | `cmd 2> file` | Send standard error to `file` |
 | `cmd 2>> file` | Append standard error to `file` |
 | `cmd 2>&1` | Send standard error to the current standard output |
+| `cmd >&2` or `cmd 1>&2` | Send standard output to the current standard error |
+
+Quoted or escaped operators are ordinary words: `echo "|"` prints `|`.
 
 Redirections are applied left to right, as in a POSIX shell. For example,
 `cmd >out.txt 2>&1` sends both streams to `out.txt`, while
@@ -259,11 +262,15 @@ Algorithms:
 For every run the simulator prints:
 
 1. the algorithm name and parameters;
-2. the initial PCB table;
+2. the initial PCB table (all processes `New`);
 3. a Gantt chart;
-4. the final PCB table;
-5. per-process completion, waiting, and turnaround times;
-6. average waiting time and average turnaround time.
+4. a timed log of PCB state changes: `New -> Ready` on arrival,
+   `Ready -> Running` on dispatch, `Running -> Ready` on preemption, and
+   `Running -> Terminated` on completion (there are no I/O events, so no
+   process enters `Waiting`);
+5. the final PCB table (all processes `Terminated`);
+6. per-process completion, waiting, and turnaround times;
+7. average waiting time and average turnaround time.
 
 ### Algorithm assumptions
 
@@ -338,6 +345,14 @@ request: 1 1 0 2
 ```
 
 Section labels are case-insensitive. `Need` is computed as `Max - Allocation`.
+
+For `detect`, an optional `requests` section (one row per process) gives each
+process's current outstanding request. Detection then uses that Request matrix,
+as in the standard detection algorithm, and a process holding no resources is
+never reported as deadlocked. Without a `requests` section, `detect` assumes the
+worst case, that every process is requesting its full `Need`, and says so in
+its output. See `tests/deadlock/requests_ok.txt` and
+`tests/deadlock/requests_deadlock.txt`.
 The parser also accepts a positional form without labels:
 
 ```text
@@ -390,7 +405,7 @@ system in an unsafe state.
 make test
 ```
 
-The suite currently runs **99 checks** covering:
+The suite currently runs **127 checks** covering:
 
 - shell built-ins, quoting, variables, conditionals, pipes, and redirection;
 - `2>` and `2>&1` ordering and behavior;
@@ -449,7 +464,7 @@ Micro_Shell/
 │   ├── utils.c                 vectors, strings, file helpers
 │   └── shell_getline.c/.h      line input
 ├── tests/
-│   ├── run_tests.sh            99-check regression suite
+│   ├── run_tests.sh            127-check regression suite
 │   ├── compare.sh              six-algorithm comparison table
 │   ├── processes/              scheduler fixtures
 │   ├── deadlock/               deadlock fixtures

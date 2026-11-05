@@ -22,7 +22,7 @@ module implements FCFS, SJN, Priority, Round-Robin, Multilevel Queue, and
 Multilevel Feedback Queue directly from their definitions. The deadlock module
 implements both the detection algorithm and the Banker's safety algorithm,
 including safe-sequence reporting and resource-request handling. A regression
-suite of 99 checks and a comparison report generated from actual runs verify the
+suite of 127 checks and a comparison report generated from actual runs verify the
 implementation.
 
 ## 1. Introduction
@@ -62,8 +62,9 @@ MiniShell is organized as a set of cooperating modules:
 
 The parser turns one command line into a sequence of command groups separated by
 `;`, `&&`, and `||`. Each group is split into pipeline stages, and each stage is
-split into arguments and redirections. The executor then either runs a built-in
-in the shell process or creates a child process for an external command. A
+split into arguments and redirections. The executor runs `cd` and `exit` in the
+shell process, because they change the shell's own state, and runs every other
+command (including built-ins such as `cat` and `grep`) in a child process. A
 pipeline creates one child per stage and connects the stages with pipes.
 
 The scheduler and deadlock simulators are built-ins. They read ordinary text
@@ -101,9 +102,14 @@ and then runs a built-in or an external command. The parent closes the pipe ends
 it does not need and waits for all children. The pipeline status is the status of
 its last stage.
 
-Built-ins that run in the shell process temporarily save and restore file
-descriptors when redirections are present. This keeps a redirection from leaking
-into the next command.
+`cd` and `exit` run in the shell process and temporarily save and restore file
+descriptors when redirections are present, so a redirection does not leak into
+the next command. All other built-ins run in a forked child, like external
+commands. This lets Ctrl+C stop a built-in such as `cat`, and keeps a built-in
+that reads standard input to end-of-file from closing the shell's own input.
+
+`NAME=value cmd` sets `NAME` only for `cmd`. A line made only of assignments
+(`NAME=value`) sets the variable in the shell.
 
 ### 3.3 Built-ins
 
@@ -157,8 +163,34 @@ waiting    = turnaround - burst
 average    = sum of the per-process values / number of processes
 ```
 
-For each run it prints the initial PCB table, a Gantt chart, the final PCB table,
-per-process results, and the two averages.
+For each run it prints the initial PCB table (every process in the New state),
+a Gantt chart, a log of process state transitions, the final PCB table (every
+process Terminated), per-process results, and the two averages.
+
+The state log replays the schedule and prints each change of PCB state with
+its time:
+
+- **New -> Ready** when the process arrives;
+- **Ready -> Running** when it is dispatched to the CPU;
+- **Running -> Ready** when it is preempted (quantum expired, or a
+  higher-priority queue takes over in MLQ/MLFQ);
+- **Running -> Terminated** when its burst completes.
+
+The simulator has no I/O events, so no process enters the **Waiting** state; a
+process that is not running waits in the Ready queue. For example, Round-Robin
+(q=4) on `basic.txt` begins:
+
+```text
+Process state transitions:
+  t=0     P1    New      -> Ready      (arrived)
+  t=0     P1    Ready    -> Running    (dispatched)
+  t=1     P2    New      -> Ready      (arrived)
+  t=2     P3    New      -> Ready      (arrived)
+  t=3     P4    New      -> Ready      (arrived)
+  t=4     P1    Running  -> Ready      (preempted)
+  t=4     P2    Ready    -> Running    (dispatched)
+  t=8     P2    Running  -> Terminated (burst complete)
+```
 
 ### 4.2 Algorithms
 
@@ -212,6 +244,12 @@ than or equal to `Work`, marks it finished, and releases its allocation into
 `Work`. If every process finishes, the state is safe. If some remain unfinished,
 those processes are reported as deadlocked and a recovery suggestion is printed.
 
+When the input has a `requests` section, detection uses that Request matrix
+instead of `Need`, which is the textbook detection algorithm: a process can
+finish if its *current* request fits in `Work`, and a process that holds no
+resources is never counted as deadlocked. Without it, the simulator assumes
+the worst case (every process requests its full `Need`) and prints a note.
+
 For `tests/deadlock/deadlocked.txt` the output is:
 
 ```text
@@ -244,6 +282,42 @@ prints `Request DENIED.` and a reason. For example:
 deadlock banker tests/deadlock/safe.txt --request 1 1 0 2   # granted
 deadlock banker tests/deadlock/safe.txt --request 0 7 4 3   # denied
 ```
+
+### 5.4 Safe and unsafe examples
+
+**Safe example** (`tests/deadlock/safe.txt`, 5 processes, 3 resources,
+Available = 3 3 2). P1's Need (1 2 2) fits in Available, so P1 can finish and
+release its allocation. That makes room for P3, then P0, P2, and P4:
+
+```text
+$ deadlock banker tests/deadlock/safe.txt
+State is SAFE.
+Safe sequence: P1 -> P3 -> P0 -> P2 -> P4
+```
+
+**Unsafe example** (`tests/deadlock/unsafe.txt`, 3 processes, 2 resources):
+
+| Process | Allocation | Max | Need |
+| --- | --- | --- | --- |
+| P0 | 1 0 | 2 1 | 1 1 |
+| P1 | 0 1 | 1 2 | 1 1 |
+| P2 | 1 1 | 2 2 | 1 1 |
+
+Available is 0 0. Every process still needs one more unit of each resource,
+and nothing is free, so the safety check cannot finish any process:
+
+```text
+$ deadlock banker tests/deadlock/unsafe.txt
+State is UNSAFE.
+No safe sequence exists.
+Unfinished processes: P0 P1 P2
+Suggestion: reject or roll back an allocation request.
+```
+
+An unsafe state is not necessarily a deadlock yet. It means the system can no
+longer *guarantee* that every process finishes if each one asks for its full
+maximum. The Banker's algorithm exists to avoid ever entering such a state, by
+denying any request that would lead to one.
 
 ## 6. Comparison of schedulers
 
@@ -322,7 +396,7 @@ visible by reporting both the Gantt chart and the averages.
 ## 7. Testing and verification
 
 The regression suite is `tests/run_tests.sh` and is run with `make test`. It
-currently contains **99 checks**. Coverage includes:
+currently contains **127 checks**. Coverage includes:
 
 - all required shell built-ins and common error cases;
 - quoting, variables, `$?`, `env`, and script mode;
@@ -360,7 +434,7 @@ MiniShell meets the project requirements in a single C codebase. The shell uses
 real POSIX process and pipe operations, the scheduler implements six algorithms
 with complete PCB/Gantt/average output, and the deadlock module supports both
 detection and Banker's algorithm with safe-sequence and request handling. The
-99-check regression suite and the measured comparison tables provide evidence
+127-check regression suite and the measured comparison tables provide evidence
 that the implementation works on normal and edge-case inputs. The main
 limitations are the intentionally small option parsers, the POSIX-only process
 model, and the simplified MLQ/MLFQ preemption rules; these are documented in the

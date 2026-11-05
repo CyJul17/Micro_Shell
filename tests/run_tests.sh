@@ -20,16 +20,36 @@ trap 'rm -rf "$TMP"' EXIT
 PASS=0
 FAIL=0
 
+# Boot-log style output, like a Linux init system:
+#   [  OK  ] cd and pwd
+#   [FAILED] exit status
+# Colors are used only when stdout is a terminal and NO_COLOR is unset.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    GREEN=$'\033[1;32m'
+    RED=$'\033[1;31m'
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+else
+    GREEN=''
+    RED=''
+    BOLD=''
+    RESET=''
+fi
+
+section() {
+    printf '\n%s         Starting %s...%s\n' "$BOLD" "$1" "$RESET"
+}
+
 pass() {
     PASS=$((PASS + 1))
-    printf '  ok   %s\n' "$1"
+    printf '[%s  OK  %s] %s\n' "$GREEN" "$RESET" "$1"
 }
 
 fail() {
     FAIL=$((FAIL + 1))
-    printf '  FAIL %s\n' "$1"
+    printf '[%sFAILED%s] %s\n' "$RED" "$RESET" "$1"
     if [ -n "${2:-}" ]; then
-        printf '       %s\n' "$2"
+        printf '         %s\n' "$2"
     fi
 }
 
@@ -87,7 +107,7 @@ check_missing() {
     fi
 }
 
-echo "== Shell core =="
+section "MiniShell core tests"
 
 out=$("$BIN" -c "cd '$TMP'; pwd" 2>&1)
 check_contains "$out" "$TMP" "cd and pwd"
@@ -214,8 +234,40 @@ out=$("$BIN" "$TMP/script.msh" 2>&1)
 check_contains "$out" "script" "script file mode"
 check_contains "$out" "second" "script file pipeline"
 
-echo
-echo "== Scheduler =="
+out=$("$BIN" -c 'echo "|" ">" a\|b' 2>&1)
+check_contains "$out" "| > a|b" "quoted operators are plain words"
+
+out=$("$BIN" -c 'X="|"; echo $X' 2>&1)
+check_contains "$out" "|" "expanded operator is a plain word"
+
+out=$("$BIN" -c 'echo a > > x' 2>&1)
+check_contains "$out" "expected a file name" "redirect without file name"
+
+out=$("$BIN" -c "MS_TMPVAR=inner env > '$TMP/env.txt'; grep MS_TMPVAR '$TMP/env.txt'; echo \"after=\$MS_TMPVAR\"" 2>&1)
+check_contains "$out" "MS_TMPVAR=inner" "prefix assignment reaches the command"
+check_contains "$out" "after=" "prefix assignment does not persist"
+check_not_contains "$out" "after=inner" "prefix assignment is temporary"
+
+out=$("$BIN" -c 'echo to-stderr >&2' 2>/dev/null)
+check_not_contains "$out" "to-stderr" ">&2 moves stdout to stderr"
+out=$("$BIN" -c 'echo to-stderr 1>&2' 2>&1 >/dev/null)
+check_contains "$out" "to-stderr" "1>&2 output appears on stderr"
+
+out=$(printf 'cat < %s\necho still-running\n' "$TMP/out.txt" | "$BIN" 2>&1)
+check_contains "$out" "hello" "builtin cat < file from piped stdin"
+check_contains "$out" "still-running" "shell survives builtin reading stdin"
+check_not_contains "$out" "MiniShell -" "no banner when stdin is not a terminal"
+
+out=$(printf 'cat\nline-for-cat\n' | "$BIN" 2>&1)
+check_contains "$out" "line-for-cat" "child reads input after the command line"
+
+"$BIN" -c "mkdir -p '$TMP/self/sub'" >/dev/null 2>&1
+out=$("$BIN" -c "cp -r '$TMP/self' '$TMP/self/sub/copy'" 2>&1)
+st=$?
+check_status "$st" 1 "cp -r into itself is refused"
+check_contains "$out" "into itself" "cp -r into itself message"
+
+section "CPU scheduler tests"
 
 for algo in fcfs sjn priority rr mlq mlfq; do
     out=$("$BIN" -c "sched $algo tests/processes/basic.txt" 2>&1)
@@ -233,6 +285,20 @@ check_contains "$out" "8.75" "FCFS average waiting value"
 
 out=$("$BIN" -c 'sched rr --quantum 2 tests/processes/basic.txt' 2>&1)
 check_contains "$out" "Quantum: 2" "RR custom quantum"
+
+out=$("$BIN" -c 'sched rr --quantum 4 tests/processes/basic.txt' 2>&1)
+check_contains "$out" "Process state transitions:" "PCB state transition log"
+check_contains "$out" "New      -> Ready" "state New -> Ready"
+check_contains "$out" "Ready    -> Running" "state Ready -> Running"
+check_contains "$out" "Running  -> Ready      (preempted)" "state Running -> Ready on preemption"
+check_contains "$out" "Running  -> Terminated" "state Running -> Terminated"
+
+out=$("$BIN" -c 'sched fcfs tests/processes/basic.txt' 2>&1)
+check_not_contains "$out" "(preempted)" "FCFS never preempts"
+
+out=$("$BIN" -c 'sched mlq --quantum 3 tests/processes/basic.txt' 2>&1)
+st=$?
+check_status "$st" 2 "--quantum rejected for non-rr algorithms"
 
 out=$("$BIN" -c 'sched fcfs tests/processes/edge_empty.txt' 2>&1)
 check_contains "$out" "No processes loaded." "empty process file"
@@ -252,8 +318,7 @@ out=$("$BIN" -c 'sched fcfs tests/processes/does-not-exist.txt' 2>&1)
 st=$?
 check_status "$st" 1 "missing process file"
 
-echo
-echo "== Deadlock =="
+section "Deadlock simulator tests"
 
 out=$("$BIN" -c 'deadlock detect tests/deadlock/safe.txt' 2>&1)
 check_contains "$out" "No deadlock detected." "detect safe state"
@@ -261,6 +326,20 @@ check_contains "$out" "No deadlock detected." "detect safe state"
 out=$("$BIN" -c 'deadlock detect tests/deadlock/deadlocked.txt' 2>&1)
 check_contains "$out" "Deadlock detected." "detect deadlock"
 check_contains "$out" "P0 P1" "list deadlocked processes"
+
+out=$("$BIN" -c 'deadlock detect tests/deadlock/requests_ok.txt' 2>&1)
+check_contains "$out" "No deadlock detected." "detect with Request matrix (no deadlock)"
+check_contains "$out" "P0 -> P2 -> P1 -> P3 -> P4" "detect order with Request matrix"
+
+out=$("$BIN" -c 'deadlock detect tests/deadlock/requests_deadlock.txt' 2>&1)
+check_contains "$out" "Deadlock detected." "detect with Request matrix (deadlock)"
+check_contains "$out" "Deadlocked processes: P1 P2 P3 P4" "deadlocked set from Request matrix"
+
+printf 'processes 2\nresources 1\nprocesses 9\n' > "$TMP/redef.txt"
+out=$("$BIN" -c "deadlock detect '$TMP/redef.txt'" 2>&1)
+st=$?
+check_status "$st" 1 "redeclared process count rejected"
+check_contains "$out" "already declared" "redeclared process count message"
 
 out=$("$BIN" -c 'deadlock detect tests/deadlock/positional.txt' 2>&1)
 check_contains "$out" "Deadlock detected." "positional input format"
@@ -299,7 +378,13 @@ st=$?
 check_status "$st" 1 "missing system file"
 
 echo
-printf 'Tests passed: %d, failed: %d\n' "$PASS" "$FAIL"
+if [ "$FAIL" -eq 0 ]; then
+    printf '[%s  OK  %s] Reached target %sAll Tests Passed%s (%d passed).\n' \
+        "$GREEN" "$RESET" "$BOLD" "$RESET" "$PASS"
+else
+    printf '[%sFAILED%s] %d of %d tests failed. See the [FAILED] lines above.\n' \
+        "$RED" "$RESET" "$FAIL" "$((PASS + FAIL))"
+fi
 if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
