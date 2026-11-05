@@ -55,6 +55,8 @@ int main(int argc, char **argv) {
             print_error("%s: %s", argv[1], strerror(errno));
             return 1;
         }
+        /* Commands run from the script must not inherit the script's fd. */
+        fcntl(fileno(fp), F_SETFD, FD_CLOEXEC);
         int status = run_stream(fp, 0);
         fclose(fp);
         return status & 0xff;
@@ -65,6 +67,17 @@ int main(int argc, char **argv) {
         return EXIT_USAGE;
     }
 
-    print_banner();
-    return run_stream(stdin, 1) & 0xff;
+    int interactive = isatty(STDIN_FILENO);
+    if (interactive) {
+        print_banner();
+    } else {
+        /*
+         * Commands piped into the shell (./minishell < script): read stdin
+         * unbuffered so the shell never reads ahead past the current line.
+         * Otherwise child commands that read stdin would miss input the
+         * shell had already buffered.
+         */
+        setvbuf(stdin, NULL, _IONBF, 0);
+    }
+    return run_stream(stdin, interactive) & 0xff;
 }

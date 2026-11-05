@@ -61,7 +61,7 @@ typedef struct {
 typedef struct {
     int fd;             /* 0 = stdin, 1 = stdout, 2 = stderr */
     int append;         /* nonzero for >> */
-    int dup_stdout;     /* nonzero for 2>&1 */
+    int dup_from;       /* >= 0 for N>&M: dup2(M, fd); -1 otherwise */
     char *path;         /* borrowed from the token vector */
 } Redirect;
 
@@ -125,7 +125,6 @@ void format_mode(mode_t mode, char *buf);
 /* ---------- parser.c ---------- */
 int shell_execute_line(const char *line);
 int shell_execute_segment(const char *segment);
-int shell_lex(const char *input, StrVec *tokens, char **err);
 int shell_split_sequence(const char *line, SeqItem **items, size_t *count,
                          char **err);
 void seq_items_free(SeqItem *items, size_t count);

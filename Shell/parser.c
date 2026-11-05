@@ -1,5 +1,9 @@
 #include "main.h"
 
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#include <stdio_ext.h>  /* __fpurge */
+#endif
+
 /* ---------- small growable token buffer ---------- */
 
 typedef struct {
@@ -164,8 +168,9 @@ int shell_split_sequence(const char *line, SeqItem **items, size_t *count,
             continue;
         }
         if (c == '&') {
-            /* The & in 2>&1 is part of a redirection, not a background job. */
-            if (i > 0 && line[i - 1] == '>' && i + 1 < len && line[i + 1] == '1') {
+            /* The & in 2>&1 or >&2 is part of a redirection, not a background job. */
+            if (i > 0 && line[i - 1] == '>' && i + 1 < len &&
+                (line[i + 1] == '1' || line[i + 1] == '2')) {
                 i++;
                 continue;
             }
@@ -196,6 +201,43 @@ fail:
 }
 
 /* ---------- lexer: words, quotes, $expansion, operators ---------- */
+
+/*
+ * Each token remembers whether it is an operator. A quoted or expanded "|"
+ * or ">" is an ordinary word and must never be treated as a pipe or redirect.
+ */
+typedef struct {
+    char *text;
+    int is_op;
+} Token;
+
+typedef struct {
+    Token *items;
+    size_t len;
+    size_t cap;
+} TokenVec;
+
+static void tv_init(TokenVec *v) {
+    v->items = NULL;
+    v->len = 0;
+    v->cap = 0;
+}
+
+static void tv_push(TokenVec *v, char *text, int is_op) {
+    if (v->len == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 8;
+        v->items = xrealloc(v->items, v->cap * sizeof(*v->items));
+    }
+    v->items[v->len].text = text;
+    v->items[v->len].is_op = is_op;
+    v->len++;
+}
+
+static void tv_free(TokenVec *v) {
+    for (size_t i = 0; i < v->len; i++) free(v->items[i].text);
+    free(v->items);
+    tv_init(v);
+}
 
 static int is_name_start(int c) {
     return isalpha((unsigned char)c) || c == '_';
@@ -254,18 +296,18 @@ static void expand_dollar(const char *input, size_t *index, TokenBuf *b) {
     *index = j;
 }
 
-static void flush_token(TokenBuf *b, StrVec *tokens, int *in_token,
+static void flush_token(TokenBuf *b, TokenVec *tokens, int *in_token,
                         int *token_quoted) {
     if (*in_token) {
-        strvec_push(tokens, tb_take(b));
+        tv_push(tokens, tb_take(b), 0);
         *in_token = 0;
         *token_quoted = 0;
     }
 }
 
-static int lex_redirect(const char *input, size_t *index, TokenBuf *b,
-                        StrVec *tokens, int *in_token, int *token_quoted,
-                        char **err) {
+/* Lexes >, >>, >&N with an optional 1/2 prefix, e.g. 2>>, 2>&1, 1>&2. */
+static void lex_redirect(const char *input, size_t *index, TokenBuf *b,
+                         TokenVec *tokens, int *in_token, int *token_quoted) {
     size_t i = *index;
     char prefix = 0;
     char op[8];
@@ -280,31 +322,25 @@ static int lex_redirect(const char *input, size_t *index, TokenBuf *b,
         flush_token(b, tokens, in_token, token_quoted);
     }
 
+    if (prefix) op[oplen++] = prefix;
+    op[oplen++] = '>';
     if (input[i + 1] == '>') {
-        if (prefix) op[oplen++] = prefix;
-        op[oplen++] = '>';
         op[oplen++] = '>';
         i += 2;
-    } else if (input[i + 1] == '&' && input[i + 1] != '\0' &&
-               input[i + 2] == '1') {
-        if (prefix) op[oplen++] = prefix;
-        op[oplen++] = '>';
+    } else if (input[i + 1] == '&' &&
+               (input[i + 2] == '1' || input[i + 2] == '2')) {
         op[oplen++] = '&';
-        op[oplen++] = '1';
+        op[oplen++] = input[i + 2];
         i += 3;
     } else {
-        if (prefix) op[oplen++] = prefix;
-        op[oplen++] = '>';
         i += 1;
     }
     op[oplen] = '\0';
-    strvec_push(tokens, xstrdup(op));
+    tv_push(tokens, xstrdup(op), 1);
     *index = i;
-    (void)err;
-    return 0;
 }
 
-int shell_lex(const char *input, StrVec *tokens, char **err) {
+static int shell_lex(const char *input, TokenVec *tokens, char **err) {
     TokenBuf b;
     size_t i = 0;
     size_t len = strlen(input);
@@ -313,7 +349,7 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
     int quote = 0;
     int escaped = 0;
 
-    strvec_init(tokens);
+    tv_init(tokens);
     *err = NULL;
     tb_init(&b);
 
@@ -353,6 +389,7 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
         if (c == '\\') {
             escaped = 1;
             in_token = 1;
+            token_quoted = 1;
             i++;
             continue;
         }
@@ -393,17 +430,17 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
         }
         if (c == ';') {
             flush_token(&b, tokens, &in_token, &token_quoted);
-            strvec_push(tokens, xstrdup(";"));
+            tv_push(tokens, xstrdup(";"), 1);
             i++;
             continue;
         }
         if (c == '|') {
             flush_token(&b, tokens, &in_token, &token_quoted);
             if (input[i + 1] == '|') {
-                strvec_push(tokens, xstrdup("||"));
+                tv_push(tokens, xstrdup("||"), 1);
                 i += 2;
             } else {
-                strvec_push(tokens, xstrdup("|"));
+                tv_push(tokens, xstrdup("|"), 1);
                 i++;
             }
             continue;
@@ -411,7 +448,7 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
         if (c == '&') {
             flush_token(&b, tokens, &in_token, &token_quoted);
             if (input[i + 1] == '&') {
-                strvec_push(tokens, xstrdup("&&"));
+                tv_push(tokens, xstrdup("&&"), 1);
                 i += 2;
             } else {
                 *err = xstrdup("background jobs ('&') are not supported");
@@ -420,12 +457,12 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
             continue;
         }
         if (c == '>') {
-            lex_redirect(input, &i, &b, tokens, &in_token, &token_quoted, err);
+            lex_redirect(input, &i, &b, tokens, &in_token, &token_quoted);
             continue;
         }
         if (c == '<') {
             flush_token(&b, tokens, &in_token, &token_quoted);
-            strvec_push(tokens, xstrdup("<"));
+            tv_push(tokens, xstrdup("<"), 1);
             i++;
             continue;
         }
@@ -449,7 +486,7 @@ int shell_lex(const char *input, StrVec *tokens, char **err) {
 
 fail:
     tb_free(&b);
-    strvec_free(tokens);
+    tv_free(tokens);
     return -1;
 }
 
@@ -471,7 +508,7 @@ static void command_add_arg(Command *cmd, char *arg) {
     cmd->argv[cmd->argc] = NULL;
 }
 
-static void command_add_redirect(Command *cmd, int fd, int append, int dup,
+static void command_add_redirect(Command *cmd, int fd, int append, int dup_from,
                                  char *path) {
     if (cmd->nredirs == cmd->cap_redirs) {
         cmd->cap_redirs = cmd->cap_redirs ? cmd->cap_redirs * 2 : 4;
@@ -481,43 +518,69 @@ static void command_add_redirect(Command *cmd, int fd, int append, int dup,
     Redirect *r = &cmd->redirs[cmd->nredirs++];
     r->fd = fd;
     r->append = append;
-    r->dup_stdout = dup;
+    r->dup_from = dup_from;
     r->path = path;
 }
 
-static int is_redirect_token(const char *s) {
-    return !strcmp(s, "<") || !strcmp(s, ">") || !strcmp(s, ">>") ||
-           !strcmp(s, "1>") || !strcmp(s, "1>>") ||
-           !strcmp(s, "2>") || !strcmp(s, "2>>") || !strcmp(s, "2>&1");
+/*
+ * Decodes a redirection operator: <, >, >>, N>, N>>, >&M, N>&M (N, M in 1..2).
+ * Returns 1 for a redirection, 0 for any other operator.
+ */
+static int parse_redirect_op(const char *s, int *fd, int *append,
+                             int *dup_from) {
+    *append = 0;
+    *dup_from = -1;
+    if (!strcmp(s, "<")) {
+        *fd = 0;
+        return 1;
+    }
+
+    const char *p = s;
+    *fd = 1;
+    if (*p == '1' || *p == '2') {
+        *fd = *p - '0';
+        p++;
+    }
+    if (*p != '>') return 0;
+    p++;
+    if (*p == '>') {
+        *append = 1;
+        p++;
+    } else if (*p == '&' && (p[1] == '1' || p[1] == '2')) {
+        *dup_from = p[1] - '0';
+        p += 2;
+    }
+    return *p == '\0';
 }
 
-static int parse_stage(StrVec *tokens, size_t start, size_t end, Command *cmd,
+static int parse_stage(TokenVec *tokens, size_t start, size_t end, Command *cmd,
                        char **err) {
     command_init(cmd);
 
     for (size_t i = start; i < end; i++) {
-        char *tok = tokens->items[i];
+        Token *tok = &tokens->items[i];
 
-        if (!strcmp(tok, "2>&1")) {
-            command_add_redirect(cmd, 2, 0, 1, NULL);
+        if (!tok->is_op) {
+            command_add_arg(cmd, tok->text);
             continue;
         }
-        if (is_redirect_token(tok)) {
-            if (i + 1 >= end) {
-                *err = xstrfmt("expected a file name after '%s'", tok);
-                command_free(cmd);
-                return -1;
-            }
-            int fd = 1;
-            int append = 0;
-            if (!strcmp(tok, "<")) fd = 0;
-            else if (tok[0] == '2') fd = 2;
-            else if (tok[0] == '1') fd = 1;
-            if (strstr(tok, ">>")) append = 1;
-            command_add_redirect(cmd, fd, append, 0, tokens->items[++i]);
+
+        int fd, append, dup_from;
+        if (!parse_redirect_op(tok->text, &fd, &append, &dup_from)) {
+            *err = xstrfmt("syntax error near unexpected token '%s'", tok->text);
+            command_free(cmd);
+            return -1;
+        }
+        if (dup_from >= 0) {
+            command_add_redirect(cmd, fd, 0, dup_from, NULL);
             continue;
         }
-        command_add_arg(cmd, tok);
+        if (i + 1 >= end || tokens->items[i + 1].is_op) {
+            *err = xstrfmt("expected a file name after '%s'", tok->text);
+            command_free(cmd);
+            return -1;
+        }
+        command_add_redirect(cmd, fd, append, -1, tokens->items[++i].text);
     }
 
     if (cmd->argc == 0 && cmd->nredirs == 0) {
@@ -532,8 +595,8 @@ static int apply_redirects(Command *cmd) {
     for (size_t i = 0; i < cmd->nredirs; i++) {
         Redirect *r = &cmd->redirs[i];
 
-        if (r->dup_stdout) {
-            if (dup2(STDOUT_FILENO, r->fd) < 0) {
+        if (r->dup_from >= 0) {
+            if (r->dup_from != r->fd && dup2(r->dup_from, r->fd) < 0) {
                 print_error("dup2: %s", strerror(errno));
                 return -1;
             }
@@ -587,6 +650,19 @@ static void reset_child_signals(void) {
     signal(SIGQUIT, SIG_DFL);
 }
 
+/*
+ * A forked child inherits a copy of the shell's stdin buffer, which may hold
+ * input the shell already read. Drop it so a built-in reads from fd 0 itself.
+ */
+static void discard_stdin_buffer(void) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    fpurge(stdin);
+#else
+    __fpurge(stdin);
+#endif
+    clearerr(stdin);
+}
+
 static int wait_for_pid(pid_t pid) {
     int status;
     while (waitpid(pid, &status, 0) < 0) {
@@ -599,33 +675,69 @@ static int wait_for_pid(pid_t pid) {
     return 1;
 }
 
-static int set_leading_assignments(Command *cmd, int *first_arg) {
-    int idx = 0;
-    while (idx < cmd->argc) {
+/* ---------- NAME=value prefixes ---------- */
+
+typedef struct {
+    char *name;
+    char *old;          /* NULL if the variable was unset */
+} SavedVar;
+
+static int count_assignments(const Command *cmd) {
+    int n = 0;
+    while (n < cmd->argc && is_assignment(cmd->argv[n], NULL, NULL)) n++;
+    return n;
+}
+
+/*
+ * Sets the first n NAME=value words. If saved is non-NULL (n zeroed entries),
+ * the previous values are recorded so restore_assignments() can undo them.
+ */
+static int apply_assignments(Command *cmd, int n, SavedVar *saved) {
+    for (int i = 0; i < n; i++) {
         char *name = NULL;
         char *value = NULL;
-        if (!is_assignment(cmd->argv[idx], &name, &value)) break;
-        if (setenv(name, value, 1) < 0) {
-            print_error("setenv: %s", strerror(errno));
-            free(name);
-            free(value);
-            return -1;
+        is_assignment(cmd->argv[i], &name, &value);
+        if (saved) {
+            const char *old = getenv(name);
+            saved[i].name = xstrdup(name);
+            saved[i].old = old ? xstrdup(old) : NULL;
         }
+        int rc = setenv(name, value, 1);
         free(name);
         free(value);
-        idx++;
+        if (rc < 0) {
+            print_error("setenv: %s", strerror(errno));
+            return -1;
+        }
     }
-    *first_arg = idx;
     return 0;
 }
 
-/* Never returns. Used by both external commands and pipeline children. */
+static void restore_assignments(SavedVar *saved, int n) {
+    if (!saved) return;
+    /* Reverse order so repeated names (A=1 A=2 cmd) restore correctly. */
+    for (int i = n - 1; i >= 0; i--) {
+        if (!saved[i].name) continue;
+        if (saved[i].old) setenv(saved[i].name, saved[i].old, 1);
+        else unsetenv(saved[i].name);
+        free(saved[i].name);
+        free(saved[i].old);
+    }
+}
+
+/* Built-ins that change the shell's own state must run in the shell process. */
+static int builtin_needs_shell_process(const char *name) {
+    return !strcmp(name, "cd") || !strcmp(name, "exit");
+}
+
+/* Never returns. Used by both single commands and pipeline children. */
 static void execute_in_child(Command *cmd, int first_arg) {
     if (first_arg >= cmd->argc) _exit(0);
 
     char **args = cmd->argv + first_arg;
     const Builtin *builtin = builtin_find(args[0]);
     if (builtin) {
+        discard_stdin_buffer();
         int status = builtin->fn(cmd->argc - first_arg, args);
         fflush(NULL);
         _exit(status);
@@ -640,41 +752,54 @@ static void execute_in_child(Command *cmd, int first_arg) {
     _exit(EXIT_CMD_NOT_FOUND);
 }
 
+static int run_redirects_only(Command *cmd) {
+    int saved[3];
+    if (save_fds(saved) < 0) return 1;
+    int rc = apply_redirects(cmd) < 0 ? 1 : 0;
+    fflush(NULL);
+    restore_fds(saved);
+    return rc;
+}
+
 static int execute_command(Command *cmd) {
-    if (cmd->argc == 0) {
-        int saved[3];
-        if (save_fds(saved) < 0) return 1;
-        int rc = apply_redirects(cmd) < 0 ? 1 : 0;
-        fflush(NULL);
-        restore_fds(saved);
-        return rc;
+    int nassign = count_assignments(cmd);
+
+    /* Only assignments (and/or redirections): they persist in the shell. */
+    if (nassign >= cmd->argc) {
+        if (nassign > 0 && apply_assignments(cmd, nassign, NULL) < 0) return 1;
+        return run_redirects_only(cmd);
     }
 
-    int first_arg = 0;
-    if (set_leading_assignments(cmd, &first_arg) < 0) return 1;
-    if (first_arg >= cmd->argc) {
-        int saved[3];
-        if (save_fds(saved) < 0) return 1;
-        int rc = apply_redirects(cmd) < 0 ? 1 : 0;
-        fflush(NULL);
-        restore_fds(saved);
-        return rc;
-    }
-
-    char **args = cmd->argv + first_arg;
-    int argc = cmd->argc - first_arg;
+    char **args = cmd->argv + nassign;
+    int argc = cmd->argc - nassign;
     const Builtin *builtin = builtin_find(args[0]);
 
-    if (builtin) {
-        int saved[3];
-        if (save_fds(saved) < 0) return 1;
+    if (builtin && builtin_needs_shell_process(args[0])) {
+        SavedVar *saved = NULL;
+        if (nassign > 0) {
+            saved = xmalloc((size_t)nassign * sizeof(*saved));
+            memset(saved, 0, (size_t)nassign * sizeof(*saved));
+        }
         int rc = 1;
-        if (apply_redirects(cmd) == 0) rc = builtin->fn(argc, args);
-        fflush(NULL);
-        restore_fds(saved);
+        if (apply_assignments(cmd, nassign, saved) == 0) {
+            int fds[3];
+            if (save_fds(fds) == 0) {
+                if (apply_redirects(cmd) == 0) rc = builtin->fn(argc, args);
+                fflush(NULL);
+                restore_fds(fds);
+            }
+        }
+        restore_assignments(saved, nassign);
+        free(saved);
         return rc;
     }
 
+    /*
+     * Every other command, including built-ins such as cat and grep, runs in
+     * a child: Ctrl+C can stop it, and reading stdin to EOF or redirecting
+     * stdin cannot disturb the shell's own input stream. NAME=value prefixes
+     * are set only in the child's environment.
+     */
     fflush(NULL);
     pid_t pid = fork();
     if (pid < 0) {
@@ -684,16 +809,21 @@ static int execute_command(Command *cmd) {
     if (pid == 0) {
         reset_child_signals();
         if (apply_redirects(cmd) < 0) _exit(1);
-        execute_in_child(cmd, first_arg);
+        if (apply_assignments(cmd, nassign, NULL) < 0) _exit(1);
+        execute_in_child(cmd, nassign);
         _exit(EXIT_CMD_NOT_FOUND);
     }
     return wait_for_pid(pid);
 }
 
-static int execute_pipeline(StrVec *tokens) {
+static int is_pipe_token(const Token *t) {
+    return t->is_op && !strcmp(t->text, "|");
+}
+
+static int execute_pipeline(TokenVec *tokens) {
     size_t stages_count = 1;
     for (size_t i = 0; i < tokens->len; i++) {
-        if (!strcmp(tokens->items[i], "|")) stages_count++;
+        if (is_pipe_token(&tokens->items[i])) stages_count++;
     }
 
     Command *stages = xmalloc(stages_count * sizeof(*stages));
@@ -702,7 +832,7 @@ static int execute_pipeline(StrVec *tokens) {
     char *err = NULL;
 
     for (size_t i = 0; i <= tokens->len; i++) {
-        if (i == tokens->len || !strcmp(tokens->items[i], "|")) {
+        if (i == tokens->len || is_pipe_token(&tokens->items[i])) {
             if (parse_stage(tokens, start, i, &stages[stage], &err) < 0) {
                 print_error("%s", err ? err : "parse error");
                 free(err);
@@ -767,8 +897,8 @@ static int execute_pipeline(StrVec *tokens) {
             if (pipefd[1] >= 0) close(pipefd[1]);
 
             if (apply_redirects(&stages[i]) < 0) _exit(1);
-            int first_arg = 0;
-            if (set_leading_assignments(&stages[i], &first_arg) < 0) _exit(1);
+            int first_arg = count_assignments(&stages[i]);
+            if (apply_assignments(&stages[i], first_arg, NULL) < 0) _exit(1);
             execute_in_child(&stages[i], first_arg);
             _exit(EXIT_CMD_NOT_FOUND);
         }
@@ -795,7 +925,7 @@ static int execute_pipeline(StrVec *tokens) {
 }
 
 int shell_execute_segment(const char *segment) {
-    StrVec tokens;
+    TokenVec tokens;
     char *err = NULL;
 
     if (shell_lex(segment, &tokens, &err) < 0) {
@@ -804,11 +934,11 @@ int shell_execute_segment(const char *segment) {
         return 2;
     }
     if (tokens.len == 0) {
-        strvec_free(&tokens);
+        tv_free(&tokens);
         return 0;
     }
     int status = execute_pipeline(&tokens);
-    strvec_free(&tokens);
+    tv_free(&tokens);
     return status;
 }
 

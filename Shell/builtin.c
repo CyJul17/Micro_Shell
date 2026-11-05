@@ -296,6 +296,49 @@ int builtin_touch(int argc, char **argv) {
  * cp / mv / rm
  * ==================================================================== */
 
+/*
+ * Returns 1 if `target` (which may not exist yet) is the directory `dir` or
+ * lies inside it. Used to stop `cp -r a a/sub` from recursing forever.
+ */
+static int target_inside_dir(const char *dir, const char *target) {
+    char *real_dir = realpath(dir, NULL);
+    if (!real_dir) return 0;
+
+    char *real_target = realpath(target, NULL);
+    if (!real_target) {
+        /* Target does not exist: resolve its parent and append the name. */
+        char *copy = xstrdup(target);
+        size_t len = strlen(copy);
+        while (len > 1 && copy[len - 1] == '/') copy[--len] = '\0';
+        char *slash = strrchr(copy, '/');
+        const char *parent = ".";
+        const char *name = copy;
+        if (slash) {
+            *slash = '\0';
+            parent = (slash == copy) ? "/" : copy;
+            name = slash + 1;
+        }
+        char *real_parent = realpath(parent, NULL);
+        if (real_parent) real_target = path_join(real_parent, name);
+        free(real_parent);
+        free(copy);
+    }
+
+    int inside = 0;
+    if (real_target) {
+        size_t n = strlen(real_dir);
+        if (!strcmp(real_dir, "/")) {
+            inside = 1;
+        } else if (!strncmp(real_target, real_dir, n) &&
+                   (real_target[n] == '\0' || real_target[n] == '/')) {
+            inside = 1;
+        }
+    }
+    free(real_dir);
+    free(real_target);
+    return inside;
+}
+
 int builtin_cp(int argc, char **argv) {
     int recursive = 0;
     int i = 1;
@@ -317,7 +360,28 @@ int builtin_cp(int argc, char **argv) {
         print_usage_error("cp [-r] source destination");
         return 2;
     }
-    return copy_path(argv[i], argv[i + 1], recursive);
+
+    const char *src = argv[i];
+    const char *dst = argv[i + 1];
+    if (recursive && is_directory(src)) {
+        /* Same target computation as copy_path(). */
+        char *target;
+        if (is_directory(dst)) {
+            char *base = path_basename(src);
+            target = path_join(dst, base);
+            free(base);
+        } else {
+            target = xstrdup(dst);
+        }
+        int inside = target_inside_dir(src, target);
+        free(target);
+        if (inside) {
+            print_error("cp: cannot copy directory '%s' into itself ('%s')",
+                        src, dst);
+            return 1;
+        }
+    }
+    return copy_path(src, dst, recursive);
 }
 
 int builtin_mv(int argc, char **argv) {
@@ -646,7 +710,7 @@ int builtin_help(int argc, char **argv) {
     printf("  Text:           grep [-i] [-n] [-E] pattern [file...]\n");
     printf("  Variables:      NAME=value, $NAME, ${NAME}, $?, env\n");
     printf("  Control:        cmd1 ; cmd2, cmd1 && cmd2, cmd1 || cmd2\n");
-    printf("  Streams:        >  >>  <  2>  2>&1  |\n");
+    printf("  Streams:        >  >>  <  2>  2>>  2>&1  >&2  |\n");
     printf("  Simulators:     sched <algo> [--quantum N] processes.txt\n");
     printf("                  deadlock detect|banker system.txt\n");
     printf("  Other:          echo help true false exit\n");
