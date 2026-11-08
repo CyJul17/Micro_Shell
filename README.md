@@ -20,7 +20,7 @@ The written comparison report is in [`docs/REPORT.md`](docs/REPORT.md).
 | Shell | Built-ins, external programs, quoting, variables, redirection, pipes, conditionals |
 | CPU scheduling | FCFS, SJN, Priority, Round-Robin, Multilevel Queue, Multilevel Feedback Queue |
 | Deadlock | Detection, Banker's safety algorithm, safe sequence, resource requests, recovery suggestion |
-| Tests | 127 regression checks and edge-case input files |
+| Tests | 126 regression checks and edge-case input files |
 | Report | Algorithm comparison with measured waiting/turnaround averages |
 
 ## Build
@@ -405,7 +405,7 @@ system in an unsafe state.
 make test
 ```
 
-The suite currently runs **127 checks** covering:
+The suite currently runs **126 checks** covering:
 
 - shell built-ins, quoting, variables, conditionals, pipes, and redirection;
 - `2>` and `2>&1` ordering and behavior;
@@ -464,7 +464,7 @@ Micro_Shell/
 │   ├── utils.c                 vectors, strings, file helpers
 │   └── shell_getline.c/.h      line input
 ├── tests/
-│   ├── run_tests.sh            127-check regression suite
+│   ├── run_tests.sh            126-check regression suite
 │   ├── compare.sh              six-algorithm comparison table
 │   ├── processes/              scheduler fixtures
 │   ├── deadlock/               deadlock fixtures

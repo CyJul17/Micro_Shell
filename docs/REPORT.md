@@ -22,7 +22,7 @@ module implements FCFS, SJN, Priority, Round-Robin, Multilevel Queue, and
 Multilevel Feedback Queue directly from their definitions. The deadlock module
 implements both the detection algorithm and the Banker's safety algorithm,
 including safe-sequence reporting and resource-request handling. A regression
-suite of 127 checks and a comparison report generated from actual runs verify the
+suite of 126 checks and a comparison report generated from actual runs verify the
 implementation.
 
 ## 1. Introduction
@@ -396,7 +396,7 @@ visible by reporting both the Gantt chart and the averages.
 ## 7. Testing and verification
 
 The regression suite is `tests/run_tests.sh` and is run with `make test`. It
-currently contains **127 checks**. Coverage includes:
+currently contains **126 checks**. Coverage includes:
 
 - all required shell built-ins and common error cases;
 - quoting, variables, `$?`, `env`, and script mode;
@@ -434,7 +434,7 @@ MiniShell meets the project requirements in a single C codebase. The shell uses
 real POSIX process and pipe operations, the scheduler implements six algorithms
 with complete PCB/Gantt/average output, and the deadlock module supports both
 detection and Banker's algorithm with safe-sequence and request handling. The
-127-check regression suite and the measured comparison tables provide evidence
+126-check regression suite and the measured comparison tables provide evidence
 that the implementation works on normal and edge-case inputs. The main
 limitations are the intentionally small option parsers, the POSIX-only process
 model, and the simplified MLQ/MLFQ preemption rules; these are documented in the
