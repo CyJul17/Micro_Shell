@@ -447,9 +447,6 @@ bash tests/compare.sh tests/processes/basic.txt
 | MLQ | 9.50 | 16.00 |
 | MLFQ | 13.00 | 19.50 |
 
-The report in [`docs/REPORT.md`](docs/REPORT.md) explains the tradeoffs behind
-these numbers.
-
 ## Project layout
 
 ```text
