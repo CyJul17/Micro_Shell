@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "MSYS2 POSIX (minishell)",
+            "compilerPath": "C:/msys64/usr/bin/gcc.exe",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/msys64/usr/include",
+                "C:/msys64/usr/lib/gcc/x86_64-pc-cygwin/16.2.0/include"
+            ],
+            "defines": [
+                "_GNU_SOURCE",
+                "_POSIX_C_SOURCE=200809L",
+                "__CYGWIN__"
+            ],
+            "cStandard": "gnu11",
+            "intelliSenseMode": "gcc-x64"
+        }
+    ],
+    "version": 4
+}
