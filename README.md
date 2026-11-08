@@ -11,7 +11,6 @@ Developers:
 - Queypo, Ckhiel Joshua
 - Viloria, Julian Shaun
 
-The written comparison report is in [`docs/REPORT.md`](docs/REPORT.md).
 
 ## What is included
 
